@@ -7,7 +7,9 @@ from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
-
+# 在导入部分新增
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.inspection import permutation_importance
 # For plotting learning curve
 from torch.utils.tensorboard import SummaryWriter
 
@@ -88,16 +90,38 @@ class COVID19Dataset(Dataset):
     def __len__(self):
         return len(self.x)
 
+# 在select_feat函数前添加特征重要性评估
+def feature_importance(x_train, y_train, n_features=20):
+    """
+    使用随机森林评估特征重要性并返回排序后的特征索引
+    """
+    # 转换为numpy数组
+    x_np = x_train.cpu().numpy() if isinstance(x_train, torch.Tensor) else x_train
+    y_np = y_train.cpu().numpy() if isinstance(y_train, torch.Tensor) else y_train
 
-def select_feat(train_data, valid_data, test_data, select_all=True):
+    # 训练随机森林
+    rf = RandomForestRegressor(n_estimators=100, random_state=config['seed'], max_depth=5)
+    rf.fit(x_np, y_np)
 
+    # 获取特征重要性
+    importance = rf.feature_importances_
+
+    # 排序特征
+    sorted_idx = importance.argsort()
+
+    return sorted_idx[-n_features:] if n_features else sorted_idx[::-1]
+
+# 修改select_feat函数
+def select_feat(train_data, valid_data, test_data):
     y_train, y_valid = train_data[:, -1], valid_data[:, -1]
     raw_x_train, raw_x_valid, raw_x_test = train_data[:, :-1], valid_data[:, :-1], test_data
 
-    if select_all:
-        feat_idx = list(range(raw_x_train.shape[1]))
-    else:
-        feat_idx = list(range(35, raw_x_train.shape[1]))  # TODO: Select suitable feature columns.
+    sorted_idx = feature_importance(
+        torch.FloatTensor(raw_x_train),
+        torch.FloatTensor(y_train)
+    )
+
+    feat_idx = sorted_idx[:20]
 
     return raw_x_train[:, feat_idx], raw_x_valid[:, feat_idx], raw_x_test[:, feat_idx], y_train, y_valid
 
@@ -165,10 +189,44 @@ config = {
 same_seed(config['seed'])
 train_data, test_data = pd.read_csv("./covid_train.csv").values, pd.read_csv("./covid_test.csv").values
 train_data, valid_data = train_valid_split(train_data, config['valid_ratio'], config['seed'])
+
+# 在配置文件中新增参数
+config2 = {
+    'use_rf': True,  # 是否使用随机森林选特征
+    'top_n': 20,  # 选择前N个重要特征
+    'rf_params': {
+        'n_estimators': 100,
+        'max_depth': 5,
+        'random_state': config['seed']
+    }
+}
+
+# 调整select_feat调用方式
+x_train, x_valid, x_test, y_train, y_valid = select_feat(
+    train_data,
+    valid_data,
+    test_data,
+)
+
+# 在训练前输出特征重要性
+if config2['use_rf']:
+    importance = np.array([
+        feature_importance(
+            torch.FloatTensor(x_train),
+            torch.FloatTensor(y_train)
+        )[i]
+        for i in range(x_train.shape[1])
+    ])
+
+    # 排序并显示前20个特征
+    sorted_indices = np.argsort(importance)[::-1]
+    print("Top 20 Important Features:")
+    for i in range(20):
+        print(f"{i + 1}. Feature {sorted_indices[i]}: {importance[sorted_indices[i]]:.4f}")
 print(f"""train_data size: {train_data.shape} 
 valid_data size: {valid_data.shape} 
 test_data size: {test_data.shape}""")
-x_train, x_valid, x_test, y_train, y_valid = select_feat(train_data, valid_data, test_data, config['select_all'])
+x_train, x_valid, x_test, y_train, y_valid = select_feat(train_data, valid_data, test_data)
 print(f'number of features: {x_train.shape[1]}')
 
 train_dataset, valid_dataset, test_dataset = COVID19Dataset(x_train, y_train),COVID19Dataset(x_valid, y_valid),COVID19Dataset(x_test)
@@ -185,3 +243,9 @@ model = My_model(input_dim=x_train.shape[1]).to(device)
 model.load_state_dict(torch.load(config['save_path']))
 preds = predict(test_loader, model, device)
 save_pred(preds, 'pred.csv')
+
+
+
+
+
+
